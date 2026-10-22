@@ -1,0 +1,21 @@
+
+version: '1.0'
+id: demo_workflow
+description: Demo workflow: Invoice + RAG agent integration
+entry: invoice_start
+nodes:
+  - id: invoice_start
+    type: InputHandler
+    impl: agents.invoice_agent.worker.InvoiceAgent.run
+    next: invoice_validate
+  - id: invoice_validate
+    type: Policy
+    impl: agents.invoice_agent.worker.InvoiceAgent.run
+    next: rag_search
+  - id: rag_search
+    type: InputHandler
+    impl: agents.rag_agent.worker.RAGAgent.run
+    next: workflow_end
+  - id: workflow_end
+    type: Output
+    impl: agents.invoice_agent.worker.InvoiceAgent.run

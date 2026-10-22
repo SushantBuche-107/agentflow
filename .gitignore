@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environment and secrets
+.env
+.env.*
+*.local
+
+# Logs
+*.log
+logs/
+
+# Model artifacts and local data
+models/*
+!models/.gitkeep
+data/
+*.onnx
+*.bin
+*.safetensors
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docker
+*.pidb
+
+# Node (if a UI is added later)
+node_modules/
