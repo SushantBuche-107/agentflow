@@ -1,19 +1,51 @@
-# BYOA — Build Your Own AI Agent
+# AgentFlow — YAML-Driven AI Agent Orchestration
 
-A reference framework for composing AI agents into declarative, YAML-defined workflows. BYOA provides a FastAPI orchestrator that compiles a workflow, executes its nodes sequentially with retry handling, propagates a shared execution context, and publishes node results to Kafka. Agents are ordinary Python classes with a uniform contract, making them easy to add, test, and replace.
+> **Build your own AI agents, compose them as data, and run them through a single orchestrator.**
 
-> **Project status:** Reference scaffold / prototype. The orchestration pipeline, agent contracts, YAML schema, and local infrastructure are in place. Agents are intentionally lightweight stubs, and several execution features are listed under [Roadmap](#roadmap). Review [Known Limitations](#known-limitations) before using this in a production setting.
+AgentFlow is a reference framework for composing AI agents into declarative, YAML-defined workflows. A FastAPI orchestrator compiles a workflow, executes its nodes in order with retry handling, propagates a shared execution context between agents, and publishes every node result to Kafka. Agents are ordinary Python classes behind a uniform contract, so they are easy to add, test, swap, and reuse.
 
-## Overview
+> **Project status:** Reference scaffold / prototype. The orchestration pipeline, agent contracts, YAML schema, and local infrastructure are in place. Agents are intentionally lightweight stubs, and several execution features are listed under [Roadmap](#roadmap). Read [Known Limitations](#known-limitations) before using this in production.
 
-Most agent demos hard-code a chain of calls. BYOA explores the next step: describing an agent pipeline as data, then letting an orchestrator resolve and execute each node. This makes flows easier to version, review, and reuse across teams.
+---
 
-The framework is organised around four ideas:
+## Table of Contents
 
-1. **Workflow as data** — A YAML document declares the nodes, their implementation targets, and execution order.
-2. **Pluggable agents** — Every agent subclasses `BaseAgent` and exposes `run(payload) -> dict`, so the orchestrator does not need agent-specific knowledge.
-3. **Context propagation** — Each node receives the shared context; its result is written back under the node id for downstream nodes.
-4. **Event publication** — Node results are emitted to Kafka for observability, replay, or downstream consumers.
+- [Why AgentFlow](#why-agentflow)
+- [Core Concepts](#core-concepts)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Repository Structure](#repository-structure)
+- [How It Works](#how-it-works)
+- [Workflow Specification](#workflow-specification)
+- [Agent Contract](#agent-contract)
+- [API Reference](#api-reference)
+- [Tech Stack](#tech-stack)
+- [Getting Started](#getting-started)
+- [Configuration](#configuration)
+- [Adding Your Own Agent](#adding-your-own-agent)
+- [Design Notes](#design-notes)
+- [Known Limitations](#known-limitations)
+- [Roadmap](#roadmap)
+- [Author](#author)
+
+---
+
+## Why AgentFlow
+
+Most agent demos hard-code a chain of model calls. AgentFlow explores the next step: describe an agent pipeline as **data**, then let an orchestrator resolve and execute each node. Flows become easier to version, review, diff, and reuse across teams. The orchestration layer knows nothing about invoices, RAG, or any specific domain — it only knows how to run nodes and pass context.
+
+## Core Concepts
+
+| Concept | Meaning |
+| --- | --- |
+| **Workflow** | A YAML document declaring metadata, an entry point, and an ordered list of nodes. |
+| **Node** | One executable step with a unique `id`, a `type`, and an `impl` dotted path to a callable. |
+| **Agent** | A Python class subclassing `BaseAgent` that implements `run(payload) -> dict`. |
+| **Orchestrator** | The FastAPI service that compiles the workflow, schedules nodes, and returns the result. |
+| **Scheduler** | The component that imports each node implementation, retries failures, and records output. |
+| **Context** | A shared dictionary. Input is stored under `input`; each node result is stored under its node id. |
+| **Envelope** | The standard agent return shape: `{"status", "output", "metrics"}`. |
+| **Event topic** | Kafka topic `agentflow`, where node results are published for observability or replay. |
 
 ## Features
 
@@ -22,8 +54,8 @@ The framework is organised around four ideas:
 - FastAPI orchestrator with an OpenAPI/Swagger interface.
 - YAML workflow loader (`compile_workflow`).
 - Sequential node scheduler with configurable retry attempts and error logging.
-- Dynamic resolution of node implementations from dotted paths.
-- Shared context between workflow nodes.
+- Dynamic resolution of node implementations from Python dotted paths.
+- Shared context propagation between workflow nodes.
 - Kafka producer integration for node results.
 - Uniform `BaseAgent` contract and structured logging helper.
 - Sample Invoice and RAG agents with pluggable model/storage seams.
@@ -34,7 +66,7 @@ The framework is organised around four ideas:
 
 - DAG execution (branching, parallel nodes, conditional edges).
 - Strict Pydantic request/response models and YAML schema validation.
-- Robust agent resolution that supports both functions and agent classes.
+- Robust agent resolution supporting functions, classes, and bound methods.
 - Kafka consumer workers and dead-letter topic handling.
 - Persistence of workflow runs and node results in PostgreSQL.
 - Redis-backed distributed locks and idempotency keys.
@@ -64,7 +96,7 @@ The orchestrator owns control flow. Agents own domain work. Infrastructure servi
 ## Repository Structure
 
 ```text
-byoa/
+agentflow/
 ├── agents/
 │   ├── common/
 │   │   ├── base_agent.py       # Agent contract
@@ -123,13 +155,40 @@ sequenceDiagram
     O-->>C: 200 OK
 ```
 
-1. The client submits the path to a workflow YAML file together with an input object.
-2. The compiler loads and parses the YAML into a Python dictionary.
-3. The scheduler iterates over `workflow.nodes` in order.
-4. For each node, the implementation path is imported dynamically and invoked with the current context.
-5. Successful results are published to the `byoa` Kafka topic and stored in the context under the node id.
-6. Failures are retried up to twice with a one-second backoff; exhausted nodes return `{"status": "FAILED"}`.
-7. The orchestrator returns the completed context.
+### Execution lifecycle
+
+1. **Receive** — The client submits the path to a workflow YAML file together with an input object.
+2. **Compile** — `compile_workflow` loads the YAML into a Python dictionary. No validation is performed yet.
+3. **Initialise context** — The scheduler creates `{"input": <client input>}`.
+4. **Iterate nodes** — Nodes are processed sequentially in the order they appear under `nodes`.
+5. **Resolve implementation** — For each node, the dotted `impl` path is split at the final dot, imported dynamically, and invoked.
+6. **Execute** — The callable receives the **entire context**, not just the input payload.
+7. **Publish** — Successful results are published to the `agentflow` Kafka topic keyed by node id.
+8. **Record** — The result is written back into the context under the node id for downstream nodes.
+9. **Retry** — On failure, the node is retried up to two times with a one-second delay.
+10. **Return** — After the last node, the orchestrator returns `{"workflow_status": "COMPLETED", "context": {...}}`. Exhausted nodes return `{"status": "FAILED"}`.
+
+### Context propagation example
+
+```text
+Initial context:
+{ "input": { "file": "invoices/sample.pdf", "query": "What is the invoice total?" } }
+
+After invoice_start:
+{
+  "input": { ... },
+  "invoice_start": { "status": "SUCCESS", "output": { "data": "..." }, "metrics": { "latency_ms": 120 } }
+}
+
+After rag_search:
+{
+  "input": { ... },
+  "invoice_start": { ... },
+  "rag_search": { "status": "SUCCESS", "output": { "results": [...] }, "metrics": { "latency_ms": 150 } }
+}
+```
+
+Nodes can read any previously written key from the context. This is how one agent's output becomes another agent's input.
 
 ## Workflow Specification
 
@@ -158,6 +217,8 @@ nodes:
     impl: agents.invoice_agent.worker.InvoiceAgent.run
 ```
 
+### Schema
+
 | Field | Required | Description |
 | --- | --- | --- |
 | `version` | Yes | Workflow schema version |
@@ -169,6 +230,17 @@ nodes:
 | `nodes[].type` | Yes | Node category (`InputHandler`, `Policy`, `Output`, ...) |
 | `nodes[].impl` | Yes | Dotted path to the callable implementation |
 | `nodes[].next` | No | Intended successor (reserved for DAG execution) |
+
+### Node type taxonomy
+
+| Type | Purpose |
+| --- | --- |
+| `InputHandler` | Parse/validate the incoming request or external data. |
+| `Policy` | Apply business rules, checks, or routing decisions. |
+| `Transform` | Reshape data between agents. |
+| `Output` | Format or persist the final response. |
+
+`type` is currently descriptive metadata; it does not affect execution.
 
 ## Agent Contract
 
@@ -189,7 +261,13 @@ class MyAgent(BaseAgent):
         }
 ```
 
-The return envelope is deliberately small: `status` for control flow, `output` for downstream consumption, and `metrics` for observability.
+The return envelope is deliberately small:
+
+| Field | Purpose |
+| --- | --- |
+| `status` | Control flow signal (`SUCCESS`, `FAILED`, ...) |
+| `output` | Downstream-consumable data |
+| `metrics` | Observability data (latency, tokens, cost, ...) |
 
 ## API Reference
 
@@ -199,7 +277,7 @@ The return envelope is deliberately small: `status` for control flow, `output` f
 | `GET` | `/docs` | Swagger UI |
 | `GET` | `/openapi.json` | OpenAPI schema |
 
-Request body:
+### Request body
 
 ```json
 {
@@ -211,7 +289,7 @@ Request body:
 }
 ```
 
-Response:
+### Response
 
 ```json
 {
@@ -222,6 +300,13 @@ Response:
   }
 }
 ```
+
+### Errors
+
+| Status | Cause |
+| --- | --- |
+| `400` | `workflow_yaml` missing from the request body. |
+| `500` | Unhandled error while compiling the YAML (for example, file not found). |
 
 ## Tech Stack
 
@@ -321,19 +406,57 @@ curl -X POST http://localhost:8000/api/v1/flows/run \
   }'
 ```
 
-> The example illustrates the intended end-to-end contract. See the resolver limitation below before expecting the bundled YAML to execute unchanged.
+> The example illustrates the intended end-to-end contract. See [Known Limitations](#known-limitations) before expecting the bundled YAML to execute unchanged.
 
 ## Configuration
 
 | Setting | Location | Default |
 | --- | --- | --- |
 | Kafka bootstrap servers | `platform/orchestrator/msg_bus/kafka_client.py` | `localhost:9092` |
-| Kafka topic | `platform/orchestrator/msg_bus/kafka_client.py` | `byoa` |
-| PostgreSQL database/user/password | `infra/docker-compose/docker-compose.yml` | `byoa` / `byoa` / `byoa` |
+| Kafka topic | `platform/orchestrator/msg_bus/kafka_client.py` | `agentflow` |
+| PostgreSQL database/user/password | `infra/docker-compose/docker-compose.yml` | `agentflow` / `agentflow` / `agentflow` |
 | Retry attempts | `platform/orchestrator/scheduler/scheduler.py` | `2` |
+| Retry delay | `platform/orchestrator/scheduler/scheduler.py` | `1s` |
 | API port | Uvicorn CLI | `8000` |
 
 The Compose credentials are development defaults only. Replace them and move configuration into environment variables before deploying.
+
+## Adding Your Own Agent
+
+1. Create a package under `agents/`, e.g. `agents/summary_agent/`.
+2. Implement a class that subclasses `BaseAgent` and returns the standard envelope.
+3. Reference it from a workflow using a dotted path.
+4. Publish results through the returned `output` or a side effect.
+
+```python
+# agents/summary_agent/worker.py
+from agents.common.base_agent import BaseAgent
+from agents.common.logger import get_logger
+
+logger = get_logger("SummaryAgent")
+
+class SummaryAgent(BaseAgent):
+    def run(self, payload: dict) -> dict:
+        source = payload.get("input", {}).get("text", "")
+        summary = source[:200]
+        logger.info("Summarised %d characters", len(source))
+        return {
+            "status": "SUCCESS",
+            "output": {"summary": summary},
+            "metrics": {"input_chars": len(source)},
+        }
+```
+
+Then add a node to a workflow:
+
+```yaml
+nodes:
+  - id: summarise
+    type: Transform
+    impl: agents.summary_agent.worker.SummaryAgent
+```
+
+> When wiring a class this way, the scheduler must instantiate it. The current resolver treats `impl` as a module-level callable; see the resolver limitation below.
 
 ## Design Notes
 
@@ -348,6 +471,7 @@ The Compose credentials are development defaults only. Replace them and move con
 
 - **Agent stubs:** `OCRModel.extract_text` and `VectorStore.search` return deterministic placeholder data.
 - **Resolver mismatch:** The scheduler imports everything before the final dot as a module. References such as `agents.invoice_agent.worker.InvoiceAgent.run` therefore need a resolver that understands classes and bound methods.
+- **Payload shape:** The scheduler passes the whole context to the node callable, while the sample agents expect a flat payload (`file`, `query`). Adapters will be needed.
 - **Sequential execution only:** `next`, `entry`, and node `type` are parsed but not yet used for branching or graph traversal.
 - **No validation:** The API accepts an arbitrary path and dynamic import target, which is an intentional RCE surface in this prototype.
 - **Legacy infrastructure:** The Compose file uses the deprecated `wurstmeister` Kafka and ZooKeeper images.
@@ -369,3 +493,7 @@ The Compose credentials are development defaults only. Replace them and move con
 **Sushant Buche**
 
 - GitHub: [@SushantBuche-107](https://github.com/SushantBuche-107)
+
+## License
+
+No license has been added yet. Add one before accepting external contributions.

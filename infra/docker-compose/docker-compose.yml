@@ -4,9 +4,9 @@ services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_USER: byoa
-      POSTGRES_PASSWORD: byoa
-      POSTGRES_DB: byoa
+      POSTGRES_USER: agentflow
+      POSTGRES_PASSWORD: agentflow
+      POSTGRES_DB: agentflow
     ports:
       - '5432:5432'
   redis:
@@ -22,6 +22,6 @@ services:
     environment:
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_HOST_NAME: kafka
-      KAFKA_CREATE_TOPICS: 'byoa:1:1'
+      KAFKA_CREATE_TOPICS: 'agentflow:1:1'
     ports:
       - '9092:9092'

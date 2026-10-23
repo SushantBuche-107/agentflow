@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from compiler.workflow_compiler import compile_workflow
 from scheduler.scheduler import execute_workflow_async
 
-app = FastAPI(title='BYOA Orchestrator')
+app = FastAPI(title='AgentFlow Orchestrator')
 
 @app.post('/api/v1/flows/run')
 async def run_workflow(payload: dict):
